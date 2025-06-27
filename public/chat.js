@@ -20,6 +20,47 @@ let chatHistory = [
 ];
 let isProcessing = false;
 
+// WebSocket setup
+let socket;
+let socketReady = false;
+
+function connectWebSocket() {
+  socket = new WebSocket(
+    (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws"
+  );
+
+  socket.addEventListener("open", () => {
+    socketReady = true;
+    console.log("WebSocket connected");
+  });
+
+  socket.addEventListener("close", () => {
+    socketReady = false;
+    console.log("WebSocket disconnected, retrying in 2s...");
+    setTimeout(connectWebSocket, 2000);
+  });
+
+  socket.addEventListener("message", (event) => {
+    // Expecting JSON: { response: "..." }
+    try {
+      const data = JSON.parse(event.data);
+      if (data.response) {
+        addMessageToChat("assistant", data.response);
+        chatHistory.push({ role: "assistant", content: data.response });
+      }
+    } catch (e) {
+      console.error("WebSocket message error:", e);
+    }
+    typingIndicator.classList.remove("visible");
+    isProcessing = false;
+    userInput.disabled = false;
+    sendButton.disabled = false;
+    userInput.focus();
+  });
+}
+
+connectWebSocket();
+
 // Auto-resize textarea as user types
 userInput.addEventListener("input", function () {
   this.style.height = "auto";
@@ -42,101 +83,27 @@ sendButton.addEventListener("click", sendMessage);
  */
 async function sendMessage() {
   const message = userInput.value.trim();
-
-  // Don't send empty messages
-  if (message === "" || isProcessing) return;
-
-  // Disable input while processing
+  if (message === "" || isProcessing || !socketReady) return;
   isProcessing = true;
   userInput.disabled = true;
   sendButton.disabled = true;
-
-  // Add user message to chat
   addMessageToChat("user", message);
-
-  // Clear input
   userInput.value = "";
   userInput.style.height = "auto";
-
-  // Show typing indicator
   typingIndicator.classList.add("visible");
-
-  // Add message to history
   chatHistory.push({ role: "user", content: message });
-
   try {
-    // Create new assistant response element
-    const assistantMessageEl = document.createElement("div");
-    assistantMessageEl.className = "message assistant-message";
-    assistantMessageEl.innerHTML = "<p></p>";
-    chatMessages.appendChild(assistantMessageEl);
-
-    // Scroll to bottom
-    chatMessages.scrollTop = chatMessages.scrollHeight;
-
-    // Send request to API
-    const response = await fetch("/api/chat", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        messages: chatHistory,
-      }),
-    });
-
-    // Handle errors
-    if (!response.ok) {
-      throw new Error("Failed to get response");
-    }
-
-    // Process streaming response
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let responseText = "";
-
-    while (true) {
-      const { done, value } = await reader.read();
-
-      if (done) {
-        break;
-      }
-
-      // Decode chunk
-      const chunk = decoder.decode(value, { stream: true });
-
-      // Process SSE format
-      const lines = chunk.split("\n");
-      for (const line of lines) {
-        try {
-          const jsonData = JSON.parse(line);
-          if (jsonData.response) {
-            // Append new content to existing text
-            responseText += jsonData.response;
-            assistantMessageEl.querySelector("p").textContent = responseText;
-
-            // Scroll to bottom
-            chatMessages.scrollTop = chatMessages.scrollHeight;
-          }
-        } catch (e) {
-          console.error("Error parsing JSON:", e);
-        }
-      }
-    }
-
-    // Add completed response to chat history
-    chatHistory.push({ role: "assistant", content: responseText });
+    // Send message via WebSocket
+    socket.send(
+      JSON.stringify({ messages: chatHistory })
+    );
   } catch (error) {
-    console.error("Error:", error);
+    console.error("WebSocket send error:", error);
     addMessageToChat(
       "assistant",
-      "Sorry, there was an error processing your request.",
+      "Sorry, there was an error processing your request."
     );
-  } finally {
-    // Hide typing indicator
     typingIndicator.classList.remove("visible");
-
-    // Re-enable input
     isProcessing = false;
     userInput.disabled = false;
     sendButton.disabled = false;

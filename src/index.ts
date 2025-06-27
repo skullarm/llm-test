@@ -28,6 +28,11 @@ export default {
   ): Promise<Response> {
     const url = new URL(request.url);
 
+    // WebSocket endpoint
+    if (url.pathname === "/ws") {
+      return handleWebSocket(request, env);
+    }
+
     // Handle static assets (frontend)
     if (url.pathname === "/" || !url.pathname.startsWith("/api/")) {
       return env.ASSETS.fetch(request);
@@ -96,4 +101,60 @@ async function handleChatRequest(
       },
     );
   }
+}
+
+// Add WebSocket upgrade handler
+async function handleWebSocket(request: Request, env: Env): Promise<Response> {
+  if (request.headers.get("Upgrade") !== "websocket") {
+    return new Response("Expected Upgrade: websocket", { status: 426 });
+  }
+
+  const { 0: client, 1: server } = Object.values(new WebSocketPair());
+
+  server.accept();
+
+  server.addEventListener("message", async (event) => {
+    try {
+      let dataString = event.data;
+      if (dataString instanceof ArrayBuffer) {
+        dataString = new TextDecoder().decode(dataString);
+      }
+      const { messages = [] } = JSON.parse(dataString);
+      // Add system prompt if not present
+      if (!messages.some((msg: any) => msg.role === "system")) {
+        messages.unshift({ role: "system", content: SYSTEM_PROMPT });
+      }
+      // Call the LLM (streaming not supported over WS, so send full response)
+      const aiResponse = await env.AI.run(
+        MODEL_ID,
+        {
+          messages,
+          max_tokens: 1024,
+        }
+      );
+      // aiResponse may have different shapes; try to extract the text
+      let text = "[No response]";
+      if (typeof aiResponse === "string") {
+        text = aiResponse;
+      } else if (aiResponse && typeof aiResponse === "object") {
+        if ("response" in aiResponse && typeof aiResponse.response === "string") {
+          text = aiResponse.response;
+        } else if ("result" in aiResponse && typeof aiResponse.result === "string") {
+          text = aiResponse.result;
+        }
+      }
+      server.send(JSON.stringify({ response: text }));
+    } catch (err) {
+      server.send(JSON.stringify({ response: "Sorry, there was an error processing your request." }));
+    }
+  });
+
+  server.addEventListener("close", () => {
+    // Clean up if needed
+  });
+
+  return new Response(null, {
+    status: 101,
+    webSocket: client,
+  });
 }
